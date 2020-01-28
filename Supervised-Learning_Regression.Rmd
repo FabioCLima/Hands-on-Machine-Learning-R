@@ -1,0 +1,581 @@
+---
+title: "Supervised Learning - Regression"
+author: "Fabio Carvalho Lima"
+date: "25/01/2020"
+output: pdf_document
+---
+
+## Predicting medical expenses using linear regression
+
+### Introduction
+
+The goal of this analysis is to use patient data do forecast the average medical
+care expenses for such population segments. These estimates could be used to create
+actuarial tables that set the price of yearly premiuns higher or lower according
+to the expected treatment costs.
+
+For this analysis, we will use simulated dataset containing hypothetical medical
+expenses for patients in the United States. 
+
+The *insurance.csv* file has examples of beneficiaries currently enrolled in the
+insurance plan, with features indicating characteristics of the patient as well as the total medical expenses charged to the plan for the calendar year. The features
+are:
+
+* age: An integer indicating the age of the primary beneficiary (excluding those above 64 years, as they are generally covered by the government).
+
+* sex: The policy holder's gender: either male or female.
+
+* bmi: The body mass index (BMI), which provides a sense of how over or underweight
+a person is relative to their height. BMI is equal to weight (in kilograms) divided by height (in meters) squared. An ideal BMI is within the range of $18.5$ to $24.9$.
+
+* children: An integer indicating the number of children/dependents covered by the 
+insurance plan.
+
+* smoker: A yes or no categorical variable that indicates whether the insured
+regularly smokes tobacco.
+
+* region. The beneficiary's place of residence in the US, divided into four geographic regions: northeast, southeast, southwest, or northwest.
+
+It is important to give some thought to how these variables may relate to billed
+medical expenses. For example, we might expect that older people, smokers and with 
+high bmi are at higher risk of large medical expenses.
+
+### Exploring and preparing the data
+
+```{r}
+
+options(digits = 3)
+# read the data and inspect the 6 first lines
+insurance <- read.csv("./data/insurance.csv", stringsAsFactors = TRUE)
+head(insurance)
+```
+
+
+```{r}
+
+str(insurance)
+```
+
+Let's check for missing values:
+
+```{r}
+
+sapply(insurance, function(x) sum(is.na(x)))
+```
+
+
+Our model's dependent variable is **expense**, which measures the medical costs each person charged to the insurance plan for a year. Prior to building a multiple regression model, it is often helpful to check for normality. Although linear regression does not stricly require a normally distributed dependent variable, the 
+model often fits better when this is true.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+insurance %>% ggplot(aes(x = expenses)) + 
+  geom_histogram(fill = "green2", color = "black") +
+  ggtitle("Outcome distribution")
+```
+
+```{r}
+
+summary(insurance$expenses)
+```
+
+As we can see, the outcome distribution isn't normal at all. Most of the people in your data have yearly medical expenses between zero and $\$15,000$. As we discussed before, this distribution is not ideal for a linear regression, because regression 
+algoritms usually predict the expected, or mean value of the output. This means that predicting expenses directly will tend to overpredict the typical expenses for
+subjects with a given set of characteristics. If you take the log of lognormally distributed data, the resulting data is normally distributed. This means the mean tracks the median, and the dynamic range of the data is more modest. 
+
+```{r}
+
+insurance %>% ggplot(aes(x = log(expenses))) + 
+  geom_density(lwd = 1, color = "green") + 
+  geom_vline(xintercept = median(log(insurance$expenses)),
+             color = "red",
+             linetype = "dashed",
+             size  = 1.5) +
+  geom_vline(xintercept = mean(log(insurance$expenses)),
+             color = "darkblue",
+             size = 1.5) +
+  ggtitle("Distribution of log(expenses - outcome data)")
+```
+
+As we can see in the plot above, the median and the mean is close together and the distribution look like the normal distribution. 
+
+As a process of exploratory data analysis, we must explore the relationship among the predictors (or features), to perform that we will create the correlation plot.
+
+A correlogram or correlation matrix allows us to analyse the relationship between each pair of a numeric variables in a dataset. It gives a quick overview of numerical variables. It is more used for *exploratory* purpose than explanatory.
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(GGally)
+
+insurance %>%
+        select(c("age", "bmi", "children", "expenses")) %>%
+        ggpairs(., title = "Correlogram between numerical features and the outcome")
+```
+
+In the scatterplot matrix above, we can find a pattern between age feature and expenses, they looks like straight lines, any other plots it is difficult to detected trends. The plot between bmi and expenses has two groups. If we adding more information to the matrix plot above, we can have more useful insights about the relationships. To create an better version of matrix plot we can use a function *pairs.panels()* from the psych package.
+
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+library(psych)
+insurance %>%
+        select(c("age", "bmi", "children", "expenses")) %>%
+        pairs.panels(.)
+```
+
+As we can see, the plot is more informative than before, the scaterplots above are presented with additional visual information.
+
+The oval-shaped object on each scatterplot is a correlation ellipse. It provides a visualization of correlation strength. The more the ellipse is stretched, the stronger the correlation. 
+
+The curve drawn on the scatterplot is called a **loess curve[^1]**. It is best understood by example. The curve for age and children is an upside-down U, peaking around middle age. This means tha the oldest and youngest people in the sample have fewer children on the insurance plan than those around middle age. Because this trend is nonlinear, this finding could not have been inferred from the correlations alone. For the loess curve between age and bmi is a line sloping up gradually, implying that body mass increases with age, but we had already inferred this from the correlation matrix.
+
+[^1]:LOWESS (Locally Weighted Scatterplot Smoothing), sometimes called LOESS (locally weighted smoothing), is a popular tool used in regression analysis that creates a smooth line through a timeplot or scatter plot to help you to see relationship between variables and foresee trends. - (source: wikipedia)
+
+### Building a multiple linear regression model
+
+To fit a linear regression model to data with R, we will the *caret* package for automated parameter tuning. Caret is the short for *Classification And Regression Training*. It is a complete package that covers all the stages of a pipeline for creating a machine learning predictive model.
+
+Rather than choosing arbitrary values for each of the model's parameters - a task that is not only tedious but also somewhat unscientific -  it is better to conduct a search through many possible parameter values to find the best combination.
+
+The caret package, provide tools to assist with automated parameter tuning. The core functionality is provide by a train() function, as its name suggests, it is used to train a model and serves a standardized interface for over 200 different machine learning models for both classification and regression tasks.
+
+As a necessary step for any modeling process, we have to split the data in training and test. In the training set, we will use to develop the model and the test set we use only for evaluation of the model. Caret has a function to help us to perform the split the data.
+
+#### Machine Learning with caret - splitting data
+
+```{r}
+str(insurance)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# load caret and set seed
+library(caret)
+set.seed(42)
+
+# create partition  index
+
+index <- createDataPartition(insurance$expenses, p = 0.70, list = FALSE)
+
+# subset insurance data with index
+insurance.train <- insurance[index, ]# use to fit the model 
+insurance.test <- insurance[-index,] # are essential for making sure your models                                         will make good predictions
+```
+
+
+The advantage of using a train/test split rather than just validating your model in-sample on the training set. It gives us an estimate of how well your model performs on new data. Because, we have after this split process one sample (test set) to perform its evaluation out-of-sample performance and calculate the root-mean-square (RMSE). The test set is used for predict and determine the out-of-sample error for the model.
+
+Just for checking the split process:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# training set
+library("Hmisc")
+describe(insurance.train)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# test set
+describe(insurance.test)
+```
+
+
+The train() function has a few arguments and its the core of caret's package. This function allow us hyperparameter the processing of training (or fitting) the model and evaluate their out-of-sample performance using cross-validation and extract metrics for both classification and regression problems.
+
+We can check any hyperparameters for any particular model, by the *modelLookup()* function.
+
+```{r}
+
+# check for the hyperparameters for lm model
+modelLookup("lm")
+```
+
+We start the process of fit the model.
+
+A better approach than a simple train/test split is using multiple test sets and
+averaging out-of-sample error, which gives us a more precise estimate of true out-of-sample error. One of the most common approaches for multiple test sets is known as "cross-validation", in which we split our data into ten "folds" or train/test splits.This is one of the best ways to estimate out-of-sample error for predictive models. 
+The *trainControl()* function is used to create a set of configuration options known as a **control object**. This object guides the train() function and allows for the selection of model evaluation criteria, such as the resampling strategy and the measure used for choosing the best model. Caret supports many types of cross-validation, and you can specify which type of cross-validation and the number of cross-validation folds with the *trainControl()* function, which you pass to the *trControl* argument in *train()*.
+
+It's important to note that you pass the method for modeling to the main train() function and the method for cross-validation to the trainControl() function.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Train model using 10-fold cross-validation
+# trainControl() function - method parameter is used to set the resampling 
+# method, such as holdout sampling or k-fold CV
+# 
+set.seed(123)   # for reproducibility
+
+fitControl <- trainControl(   
+        method = "cv", 
+        number = 10,
+        selectionFunction = "oneSE",
+        verboseIter = TRUE
+)
+
+insurance_model1 <- train(
+        expenses ~.,
+        data = insurance.train,
+        method = "lm",
+        trControl = fitControl
+)
+```
+
+
+```{r}
+
+# Print model to console
+insurance_model1
+```
+
+
+Understanding the regression coefficients is fairly straightforward. The intercept is the predicted value of *expenses* when the independent variables are equal to zero. It is often impossible to have values of zero for all of the features, and consequently the intercept has no real-world interpretation.
+
+The beta coefficients indicate the estimated increase in expenses for an increase of one unit in each of the features, assuming all other values are held constant. For example, for each additional year of age, we would expect $\$258.26$ higher medical expenses on average, assuming everything elseis held equal.
+
+The results of the linear regression model make logical sense: old age, smoking, and obesity tend to be conected to additional health issues, while additional family member dependents may result in an increase in physician visits and preventive care such vaccinations and yearly physical exams.
+
+### Evaluating model performance
+
+The parameter estimates we obtained by **summary(insurance_model1)** tell us about how the independent variables are related to the dependent variable, but they tell us nothing about how well the model fits out data.
+
+The first key to evaluate the performance of our model is the residuals.
+
+
+```{r}
+
+summary(insurance_model1)
+```
+
+The Residuals section provides summary statistics for the errors in your predictions, some of which are apparently quite large. Since a residual is equal to the true value minus the predicted value, the maximum error of $\$2999.1$ suggests that the model under-predicted expenses by nearly $\$30,000$ for at least one observation. On the other rand, $50\%$ of error fall within the first and third quartile.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+library(broom)
+
+df1 <- augment(insurance_model1$finalModel, data = insurance.train)
+df1 %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_hline(yintercept = 0, lwd = 1.5, color = "white") +
+  geom_point(size = 1, alpha = 0.4, color = "red") +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  ggtitle("insurance_model1", subtitle = "expenses ~ all predictors")
+```
+
+Another information from the residuals is quite important is constant variance among residuals. Linear regression assumes the variance among error terms are constant (this assumption is referred to as homoscedasticity). If the error variance is not constant, the p-values and confidence intervals for the coefficients will be invalid. Similar to the linear relationship assumption, non-constant variance can often be resolved with variable transformations or by including additional predictors. It seems we have some parabolics trends, it should be related to a specific feature. We will dive in some those detaills later on.
+```{r}
+
+summary(insurance_model1) %>%
+  tidy()
+```
+Another usual information from summary is about the regression coefficients, and the **p-value**, denoted Pr (>|t), provides an estimate of the probability that the true coefficient is zero given the value of the estimate. Small p-values suggest that the true coefficient is very unlikely to be zero, which means that the feature is extremely unlikely to have no relationship with the outcome variable. The p-values less than the significance level are considered **statistic significant**. Our model has several highly significant variables, and they seem to be related to the outcome in logical ways.
+
+```{r}
+
+summary(insurance_model1) %>%
+  glance()
+```
+
+The **Multiple R-squared** value (also called the coefficient of determination) provides a measure of how well our model as a whole explains the values of the dependent variable. It is similar to the correlation coefficient, closer to 1 better the model explains the data. It means the model explains nearly $75\%$ of the variation in the dependent variable.
+
+Linear regression assumes the errors are independent and uncorrelated. If in fact, there is correlation among the errors, then the estimated standard errors of the coefficients will be biased leading to prediction intervals being narrower than they should be.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+df1 <- mutate(df1, id = row_number())
+df1 %>%
+  ggplot(aes(x = id, y = .resid)) + 
+  geom_point(size = 1, alpha = .4) +
+  xlab("Row ID") +
+  ylab("Residuals") +
+  ggtitle("Model 1", subtitle = "Uncorrelated residuals.")
+```
+
+
+Given all the perfomance indicators, our model is performing fairly well. The size of some of the errors is a bit concerning, but not surprising given the nature of medical expense data. Up to know we only check the results of the model in the training set. We don't to overfit, however before we test the model in the test set, lets try to improve the model performance, by add feature related to the outcome and transform the outcome by log10 transformation.
+
+### Model specification - adding nonlinear relationships
+
+In the linear regression, the relationship between an independent variable and the dependent variable is assumed to be linear, yet this may not necessarily be true.
+For example, for old ages the treatment may become disproportionately expensive.
+A typical regression equation follows a form similar to this :
+$$ y = \alpha + \beta_{1}x $$
+
+To account for a nonlinear relantionship, such $x^{2}$, the model become a polynomial and the relationship between the outcome and predictors can be modeling like this:
+
+$$y = \alpha + \beta_{1}x + \beta_{2}x^{2}$$
+
+To add the nonlinear age to model, we write the follow code:
+
+```{r}
+
+insurance <- insurance %>% mutate(age2 = age^2) 
+```
+
+### Transformation - converting a numeric variable to a binary indicator.
+
+BMI may have higher impact for individuals are fat, which should increase the cost for such individuals. To model this relationship, we create a binary obesity indicator that is 1 if the BMI is at least 30 and 0 if it is less than 30. The estimated beta for this binary feature would then inficate the average net impact on medical expenses for individuals with BMI of 30 or above, relative to those with BMI less than 30.
+
+```{r}
+
+insurance$bmi30 <- ifelse(insurance$bmi >= 30, 1, 0)
+```
+
+### Model specification - adding interaction effects
+
+So far, we have only considered each feature's individual contribution to the outcome. What if certain features have a combined impact on the dependent variable? For instance, smoking and obesity may have harmful effects separately, but it is reasonable to assume that their combined effect may be worse than the sum of each one alone.
+
+When two features have a combined effect, this is known as an **interation**. To interact the obesity indicator (bmi30) with the smoking indicator (smoker) we would write a formula in the form expenses - bmi30*smoker
+
+```{r}
+
+set.seed(42)
+
+# create partition  index
+
+index <- createDataPartition(insurance$expenses, p = 0.70, list = FALSE)
+
+# subset insurance data with index
+insurance.train <- insurance[index, ]# use to fit the model 
+insurance.test <- insurance[-index,] # are essential for making sure your models                                         will make good predictions
+
+
+# Train model using 10-fold cross-validation
+# trainControl() function - method parameter is used to set the resampling 
+# method, such as holdout sampling or k-fold CV
+# 
+set.seed(123)   # for reproducibility
+
+fitControl <- trainControl(   
+        method = "cv", 
+        number = 10,
+        selectionFunction = "oneSE",
+        verboseIter = TRUE
+)
+
+insurance_model2 <- train(
+        expenses ~ age + age2 + children + bmi + sex + bmi30*smoker + region,
+        data = insurance.train,
+        method = "lm",
+        trControl = fitControl
+)
+```
+
+```{r}
+
+# Print model 2 to console
+insurance_model2
+```
+
+```{r}
+
+summary(insurance_model2)
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+df2 <- augment(insurance_model2$finalModel, data = insurance.train)
+df2 %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_hline(yintercept = 0, lwd = 1.5, color = "white") +
+  geom_point(size = 1, alpha = 0.4, color = "red") +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  ggtitle("insurance_model2", subtitle = "expenses ~ all predictors")
+```
+
+From the plot above there is no more parabolic pattern on the plot, it seems a improve from the model 1.
+
+```{r}
+summary(insurance_model2) %>%
+  tidy()
+```
+
+```{r}
+summary(insurance_model2) %>%
+  glance()
+```
+
+Let's summarize your first two models before we try the last one (should transforme to log10(expenses)).
+
+```{r}
+
+# Extract out of sample performance measures
+summary(resamples(list(
+  model1 = insurance_model1,
+  model2 = insurance_model2
+)))
+```
+
+For models predicting a numeric outcome (expenses) some measure of accuracy (RMSE)is typically used to evaluate the effectiveness of the model. From the cross-validation, we concluded the second model present a better results and it is safe to infer that by adding extra predictors (features) we improved **RMSE** substantially. To understand the strengths and weakness of this model, it is not reliable only a single metric. Visualizations of the model fit, particularly residual plots, are critical to understanding whether the model is fit for purpose.
+
+```{r}
+
+# Making predictions on the test set for model 2
+
+insurance.test2 <- insurance.test %>%
+        mutate(predictions = predict(insurance_model2, insurance.test))
+```
+
+```{r}
+
+# Residual for R.squared
+insurance.test2 <- insurance.test2 %>%
+        mutate(residualValues = expenses - predictions)
+summary(insurance.test2$residualValues)
+```
+It is important to check the plot of the residuals versus the predicted values can help uncover systematic patterns in the model predictions.
+
+
+```{r}
+
+ggplot(data = insurance.test2, aes(x = predictions, y = residualValues)) +
+  geom_hline(yintercept = 0, lwd = 1, color = "black",linetype = 2) +
+  geom_point(size = 1, alpha = 0.4, color = "red") +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  scale_y_continuous(limits = c(-25000,25000)) +
+  ggtitle("insurance_model2 - test set", subtitle = "expenses ~ all predictors")
+```
+
+The caret package contains functions for calculating the RMSE and $R^{2}$ value:
+
+```{r}
+# Rsquared and RMSE for test set
+observed <- insurance.test2$expenses
+predicted <- insurance.test2$predictions
+
+cat("Correlation calculated by caret = ", R2(predicted, observed), '\n')
+cat("Simple correlation = ", cor(predicted, observed), '\n')
+cat("RMSE = ", RMSE(predicted, observed))
+```
+
+From the both results above and in agreement with other analysis is secure to say, the model 2 is accurate, $R^{2}$ is high enough and RMSE seems to be small enough. We can check up whether is small or large by:
+
+```{r}
+# A RMSE much smaller than the outcome's standard deviation
+# suggests a model that predict well
+
+sd_outcome <- sd(insurance.test2$expenses)
+RMSE <- RMSE(predicted, observed)
+cat("RMSE/sd_outcome", (RMSE/sd_outcome)*100)
+```
+
+As the number above shows the RMSE is small enough which means the model predicts well the future outcome or unseen data. It is useful to plot the observed values against the predicted values helps one to understand how well the model fits.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# model 2 plot using the test set      
+ggplot(data = insurance.test2, aes(x = predictions, y = expenses)) + 
+        geom_point(alpha = 0.2, color = "black") + 
+        geom_smooth(aes(x = predictions, y = expenses), color = "darkblue") +
+        geom_abline(color = "red", linetype = 2) +
+        xlab("Predicted values") +
+        ylab("Expenses") +
+        ggtitle("insurance_model3", subtitle = "expenses ~ all predictors(+ new features)")
+```
+
+
+
+The previous results are almost the same we got in the cross-validation on the model2 as we can check up above. And as we can expected this result it better on the test and it is not overfitted, and can be use to forecast the expenses for potential new enrollees on the insurance plan.
+
+From the analysis above we would say the linear regression is less prone to overfitting, which means the performance on the new data is usually quite similar to its performance on the training data. Regression modeling makes some strong assumptions about the data. These assumptions are not as important for numeric forecasting, as the model's worth is not based upon whether it truly captures the underlying process - we simply care about the accuracy of its predictions. 
+
+
+The last model its a plus in this analysis, we are going to check if we transform the outcome, it will improve the result in anyway.
+
+The procedure we are going to perform log transformation (model 3) has 3 steps:
+
+1 - Log the outome and fit a model
+
+```{r echo=TRUE}
+
+# Train model using 10-fold cross-validation
+# trainControl() function - method parameter is used to set the resampling 
+# method, such as holdout sampling or k-fold CV
+# 
+set.seed(123)   # for reproducibility
+
+fitControl <- trainControl(   
+        method = "cv", 
+        number = 10,
+        selectionFunction = "oneSE",
+        verboseIter = FALSE
+)
+
+insurance_model3 <- train(
+        log(expenses) ~ age + age2 + children + bmi + sex + bmi30*smoker +  region,
+        data = insurance.train,
+        method = "lm",
+        trControl = fitControl
+)
+```
+
+```{r}
+print(insurance_model3)
+```
+
+```{r}
+
+df3 <- augment(insurance_model3$finalModel, data = insurance.train)
+df3 %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  geom_hline(yintercept = 0, lwd = 1.5, color = "white") +
+  geom_point(size = 1, alpha = 0.4, color = "red") +
+  xlab("Predicted values") +
+  ylab("Residuals") +
+  ggtitle("insurance_model3", subtitle = "log(expenses) ~ all predictors")
+```
+
+
+
+2 - Making predictions on the test set:
+
+
+```{r}
+
+insurance.test <- insurance.test %>%
+        mutate(logpredictions = predict(insurance_model3, insurance.test))
+summary(insurance.test$logpredictions)
+```
+
+3 - Convert the predictions to expenses units
+
+```{r}
+
+insurance.test <- insurance.test %>%
+        mutate(predictions = exp(logpredictions))
+summary(insurance.test$predictions)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ 
+# Plot predicted expenses (x axis) vs actual expenses (y axis)
+ggplot(insurance.test, aes(x = predictions, y = expenses)) + 
+  geom_point(alpha = 0.2, color = "black") + 
+  geom_smooth(aes(x = predictions, y = expenses), color = "darkblue") +
+  geom_abline(color = "blue", linetype = 2) +
+  xlab("Predicted values") +
+  ylab("Expenses") +
+  ggtitle("insurance_model3", subtitle = "log(expenses) ~ all predictors ")
+```
+
+
+We can see in the plot above there is a problem in the predictions after $\$12,000$, so even with the transformation of the dependent variable to meet the normalization requirement we could not get a better predictions from model 2
+
+```{r}
+# correlation between predictions and expenses values
+cor(insurance.test$predictions, insurance.test$expenses)
+```
+
